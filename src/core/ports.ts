@@ -1,6 +1,7 @@
 /** Ports the core depends on. Sources, policies, assessors, executors, and channels are project-specific. */
 import type { Assignment, ChannelRef, Decision, DecisionKind, Mandate, MandateBasis, Strength, Thread, Ticket, TicketEndBy, TicketOutcome, Trigger }
   from './model.ts'
+import type { RoleId } from './roles.ts'
 import type { Reason } from './reasons.ts'
 
 /** Gate admission result: either inadmissible with a reason code, or admissible with strength and MandateBasis. */
@@ -40,8 +41,8 @@ export interface Candidate {
 export type AssessmentOutcome =
   | { kind: 'ignore'; reason: string | Reason; audit?: Record<string, unknown> }
   | { kind: 'unavailable'; reason: string | Reason; audit?: Record<string, unknown> }
-  /** An accept: `rules` the assessment matched, `name` the ticket's requested short name, and `note` a routing note for its worker. */
-  | { kind: 'accept'; title: string; scope: string; reason: string | Reason; acknowledgement?: string; rules?: string[]; audit?: Record<string, unknown>;
+  /** An accept: `roleId` is required by every main-Session accept path; it is optional here only for legacy low-level callers. */
+  | { kind: 'accept'; title: string; scope: string; roleId?: RoleId; reason: string | Reason; acknowledgement?: string; rules?: string[]; audit?: Record<string, unknown>;
     name?: string; note?: string }
   | { kind: 'stop'; ticketId: string; reason: string | Reason; audit?: Record<string, unknown> }
 

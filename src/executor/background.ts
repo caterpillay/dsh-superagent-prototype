@@ -107,7 +107,7 @@ export async function untilQuiet(ctx: Context, agent: Agent, signal: AbortSignal
  * Kill the shell jobs the Session owns, but those in `except`, collecting each end so the worker is not woken to hear of it.
  * One failure stops none other.
  */
-export async function killJobs(ctx: Context, sessionId: string, reason: string, except?: ReadonlySet<string>): Promise<void> {
+export async function killJobs(ctx: Context, sessionId: string, reason: string, except?: ReadonlySet<string>, strict = false): Promise<void> {
   const jobs = registry(ctx)
   const live = jobs ? owned(jobs, sessionId, except) : []
   const failures: unknown[] = []
@@ -115,6 +115,7 @@ export async function killJobs(ctx: Context, sessionId: string, reason: string, 
   const collected = live.map(job => jobs!.wait(job.id, KILL_WAIT_MS, sessionId).catch(() => undefined))
   for (const job of live) try { jobs!.kill(job.id, sessionId, reason) } catch (error) { failures.push(error) }
   await Promise.all(collected)
+  if (strict && jobs && owned(jobs, sessionId, except).length) failures.push(new Error(`Jobs of ${sessionId} did not stop within ${KILL_WAIT_MS}ms`))
   if (failures.length) throw new AggregateError(failures, `Killing the shell jobs of ${sessionId} failed`)
 }
 
@@ -138,17 +139,29 @@ export async function collectJob(ctx: Context, sessionId: string, job: { id: str
  * returns, which wakes it, so the worker's turn is cancelled after, keeping its inbox when `keepInbox`, and the stop ends
  * with that turn. Its Session still admits subagents.
  */
-export async function stopSubagents(ctx: Context, agent: Agent, keepInbox = false): Promise<void> {
+export async function stopSubagents(ctx: Context, agent: Agent, keepInbox = false, strict = false): Promise<void> {
   const subagents = subagentsOf(ctx)
   if (!subagents) return
   // The catalog lists every subagent the Session had; one that ended has no agent.
   const live = (await subagents.listChildren(agent.id)).map(child => child.id).filter(id => ctx.agents.get(id as SessionId))
-  if (!live.length) return
-  try { await until(subagents.drainChildren(agent, live), undefined, DRAIN_LIMIT_MS) }
+  if (!live.length) {
+    if (!strict) return
+    const idle = await until(agent.whenIdle(), undefined, DRAIN_LIMIT_MS)
+    if (idle === false || agent.status !== 'idle') throw new Error(`Turn of ${agent.id} did not stop within ${DRAIN_LIMIT_MS}ms`)
+    return
+  }
+  let drained: void | false = false, idle: void | false = false
+  try { drained = await until(subagents.drainChildren(agent, live), undefined, DRAIN_LIMIT_MS) }
   finally {
     if (agent.status !== 'idle') cancelled.add(agent)
     agent.cancel({ kind: 'user' }, { keepInbox })
-    await until(agent.whenIdle(), undefined, DRAIN_LIMIT_MS)
+    idle = await until(agent.whenIdle(), undefined, DRAIN_LIMIT_MS)
+  }
+  if (strict) {
+    const remaining = (await subagents.listChildren(agent.id)).map(child => child.id).filter(id => ctx.agents.get(id as SessionId))
+    if (drained === false || idle === false || agent.status !== 'idle' || remaining.length) {
+      throw new Error(`Subagents or turn of ${agent.id} did not stop within ${DRAIN_LIMIT_MS}ms`)
+    }
   }
 }
 
@@ -156,10 +169,10 @@ export async function stopSubagents(ctx: Context, agent: Agent, keepInbox = fals
  * Stop what a worker runs in the background once its Assignment ends: kill its shell jobs and release its subagents (see
  * `stopSubagents`). A Session not loaded has no subagent at work. One failure stops nothing else.
  */
-export async function stopBackground(ctx: Context, sessionId: string, reason: string, keepInbox = false): Promise<void> {
+export async function stopBackground(ctx: Context, sessionId: string, reason: string, keepInbox = false, strict = false): Promise<void> {
   const failures: unknown[] = []
-  await killJobs(ctx, sessionId, reason).catch((error: unknown) => { failures.push(error) })
+  await killJobs(ctx, sessionId, reason, undefined, strict).catch((error: unknown) => { failures.push(error) })
   const agent = ctx.agents.get(sessionId as SessionId)
-  if (agent) await stopSubagents(ctx, agent, keepInbox).catch((error: unknown) => { failures.push(error) })
+  if (agent) await stopSubagents(ctx, agent, keepInbox, strict).catch((error: unknown) => { failures.push(error) })
   if (failures.length) throw new AggregateError(failures, `Stopping the background work of ${sessionId} failed`)
 }

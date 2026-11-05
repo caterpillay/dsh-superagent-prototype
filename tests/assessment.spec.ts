@@ -126,8 +126,10 @@ it('asks the assessment only for decisions its tool accepts, which no longer inc
   expect(mainAdmissionPolicy).not.toMatch(/reopen|decision=stop/)
   const direction = { implementation_requested: true, target_basis: 'specified', requires_design_decision: false, evidence: 'e' }
   const result = (decision: string, extra = {}) =>
-    AssessmentSchema.safeParse({ decision, rule_assessments: [], direction, title: 't', scope: 's', reason: 'r', ...extra }).success
+    AssessmentSchema.safeParse({ decision, rule_assessments: [], direction, role_id: 'api-programmer', title: 't', scope: 's', reason: 'r', ...extra }).success
   expect([result('ignore'), result('unavailable'), result('reopen'), result('stop')]).toEqual([true, true, false, false])
+  expect(result('accept', { role_id: undefined, worktree_name: 'fix-copy' })).toBe(false)
+  expect(result('accept', { role_id: 'unknown', worktree_name: 'fix-copy' })).toBe(false)
   expect(result('ignore', { ticket_id: 't' })).toBe(false)
 })
 

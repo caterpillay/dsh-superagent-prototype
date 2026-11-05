@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { TICKET_STATES } from '../src/app/cards.ts'
 import { builtInBase, builtInParts, defaultPrompts } from '../src/app/prompts.ts'
-import { UserError } from '../src/core/index.ts'
+import { ROLE_IDS, UserError } from '../src/core/index.ts'
 import { KV } from '../src/kv.ts'
 import { RESOURCES } from '../src/app/resources.ts'
 import { CliError, Commands } from '../src/infra/commands.ts'
@@ -20,7 +20,7 @@ it('reads the lists, a ticket, a decision, the settings, the prompts and the mod
   const { ticket, trigger } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   await h.acceptedTicket(feishu('2', '@bot 再修一个'))
   const tickets = await read('tickets', { limit: 1 })
-  expect(tickets).toEqual({ items: [expect.objectContaining({ ticket_id: expect.any(String), state: 'working' })], next_offset: 1 })
+  expect(tickets).toEqual({ items: [expect.objectContaining({ ticket_id: expect.any(String), state: expect.stringMatching(/^working/) })], next_offset: 1 })
   expect(await read('tickets', { offset: 1 })).toMatchObject({ items: [expect.objectContaining({ ticket_id: ticket.id })], next_offset: null })
   const triggers = await read('triggers') as { items: { trigger_id: string }[] }
   expect(triggers.items.map(item => item.trigger_id)).toEqual([expect.any(String), trigger.id])
@@ -29,7 +29,7 @@ it('reads the lists, a ticket, a decision, the settings, the prompts and the mod
   const accepted = expect.objectContaining({ kind: 'accept', ticket_id: ticket.id, trigger_ids: [trigger.id], read: expect.stringMatching(/^decision\//) })
   expect(decisions.items).toContainEqual(accepted)
   expect(await read(decisions.items.at(-1)!.read)).toMatchObject({ kind: 'accept', ticket_id: ticket.id, mandate: { strength: 'explicit' } })
-  expect(await read(`ticket/${ticket.id}`)).toMatchObject({ ticket_id: ticket.id, state: 'working', directory: ticket.execution!.directory,
+  expect(await read(`ticket/${ticket.id}`)).toMatchObject({ ticket_id: ticket.id, state: 'working', role_id: ticket.execution!.roleId, directory: ticket.execution!.directory,
     trigger_id: trigger.id, assignments: { items: [expect.objectContaining({ state: 'running' })] }, assignment: `ticket/${ticket.id}/assignment` })
   // The settings name each block's revision and hold the small blocks; a block reads whole by the name a save takes.
   const settings = await read('settings')
@@ -104,6 +104,23 @@ it('keeps the main Session\'s resources from an Executor Session, which lists on
   expect(offered).not.toMatch(/preview/i)
 })
 
+it('requires a fixed role for every explicit accept and persists a valid choice', async () => {
+  const trigger = feishu('1', '@bot 修一下回归')
+  h.runtime.receive(trigger); await h.runtime.idle()
+  const accept = { kind: 'accept', trigger_id: trigger.id, title: 'Fix', worktree_name: 'fix-regression', acknowledgement: '收到。' }
+  expect(await h.runTool(h.runtime.masterId, 'orchestrator_route', { decisions: [accept] })).toEqual({ results: [
+    { trigger_id: trigger.id, kind: 'accept', refused: 'accept needs role_id' },
+  ] })
+  expect(await h.runTool(h.runtime.masterId, 'orchestrator_route', { decisions: [{ ...accept, role_id: 'developer' }] })).toEqual({ results: [
+    { trigger_id: trigger.id, kind: 'accept', refused: expect.stringMatching(/^role_id: /) },
+  ] })
+  const result = await h.runTool(h.runtime.masterId, 'orchestrator_route', { decisions: [{ ...accept, role_id: 'qa' }] }) as
+    { results: { ticket?: { ticket_id: string; role_id?: string } }[] }
+  expect(result.results[0]!.ticket).toMatchObject({ role_id: 'qa' })
+  const ticket = h.runtime.store.tickets.get(result.results[0]!.ticket!.ticket_id)!
+  expect(ticket.execution?.roleId).toBe('qa')
+})
+
 it('answers every routing tool in one shape: the decision it recorded, why, and the ticket card', async () => {
   const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   const card = expect.objectContaining({ ticket_id: ticket.id })
@@ -148,7 +165,7 @@ it('routes several triggers in one call, in order, and answers a refused or fail
     { kind: 'ignore', trigger_id: thanks.id, reason: 'Thanks only.' },
     // A stop without its ticket is refused, alone.
     { kind: 'stop', trigger_id: request.id },
-    { kind: 'accept', trigger_id: request.id, title: 'Other', worktree_name: 'fix-other', acknowledgement: '收到。' },
+    { kind: 'accept', role_id: 'api-programmer', trigger_id: request.id, title: 'Other', worktree_name: 'fix-other', acknowledgement: '收到。' },
     { kind: 'attach', trigger_id: other.id, ticket_id: 'no-such-ticket' },
     { kind: 'attach', trigger_id: more.id, ticket_id: ticket.id },
   ] }) as { results: Record<string, unknown>[] }
@@ -168,7 +185,7 @@ it('refuses alone an item that lacks a field its kind needs or breaks a field\'s
   for (const trigger of triggers) h.runtime.receive(trigger)
   await h.runtime.idle()
   const [a, b, c, d, e] = triggers.map(trigger => trigger.id) as [string, string, string, string, string]
-  const accept = { kind: 'accept', title: 'Fix', acknowledgement: '收到。' }
+  const accept = { kind: 'accept', role_id: 'api-programmer', title: 'Fix', acknowledgement: '收到。' }
   const { results } = await h.runTool(h.runtime.masterId, 'orchestrator_route', { decisions: [
     { ...accept, trigger_id: a },
     { ...accept, trigger_id: b, worktree_name: 'one-two-three-four-five' },
@@ -193,7 +210,7 @@ it('decides a candidate\'s batch with its card\'s trigger: a second accept keeps
   h.runtime.receive(first); h.runtime.receive(second)
   await h.runtime.settings.pause(false, 'panel')
   await h.runtime.pump(); await h.runtime.idle()
-  const accept = { kind: 'accept', worktree_name: 'retitle', acknowledgement: '收到。' }
+  const accept = { kind: 'accept', role_id: 'api-programmer', worktree_name: 'retitle', acknowledgement: '收到。' }
   const { results } = await h.runTool(h.runtime.masterId, 'orchestrator_route', { decisions: [
     { ...accept, trigger_id: first.id, title: 'Retitle' },
     { ...accept, trigger_id: second.id, title: 'Another title' },
@@ -202,7 +219,7 @@ it('decides a candidate\'s batch with its card\'s trigger: a second accept keeps
   const ticketId = results[0]!.ticket!.ticket_id
   expect(results).toEqual([
     expect.objectContaining({ trigger_id: first.id, decision: 'accept' }),
-    expect.objectContaining({ trigger_id: second.id, decision: 'accept', reason: `Already accepted as ${ticketId}; title and acknowledgement unchanged` }),
+    expect.objectContaining({ trigger_id: second.id, decision: 'accept', reason: `Already accepted as ${ticketId}; title, role and acknowledgement unchanged` }),
     { trigger_id: second.id, kind: 'ignore', refused: `Decided in this call with ${first.id}, whose Decision took its batch` },
   ])
   expect(h.runtime.store.tickets.get(ticketId)!.title).toBe('Retitle')
@@ -211,9 +228,11 @@ it('decides a candidate\'s batch with its card\'s trigger: a second accept keeps
 it('states each routing field\'s limit in its description, which the schema leaves to the item\'s check', () => {
   type Schema = { parameters: { properties: { decisions: { items: { properties: Record<string, { description?: string }> } } } } }
   const fields = (h.tools.get(h.runtime.masterId)!.get('orchestrator_route') as unknown as Schema).parameters.properties.decisions.items.properties
-  const limits: Record<string, string[]> = { title: ['200 characters'], worktree_name: ['kebab-case', '32 characters'],
+  const limits: Record<string, string[]> = { role_id: ['required fixed worker role', 'does not affect authorization'], title: ['200 characters'], worktree_name: ['kebab-case', '32 characters'],
     acknowledgement: [`${IM_WORDS} words`], note: [`${NOTE_WORDS} words`, 'Never add implementation instructions'], reason: ['500 characters'] }
   for (const [field, phrases] of Object.entries(limits)) for (const phrase of phrases) expect(fields[field]!.description, field).toContain(phrase)
+  const roleSchema = JSON.stringify(fields.role_id)
+  for (const roleId of ROLE_IDS) expect(roleSchema).toContain(roleId)
 })
 
 it('stops one follow-up for each ticket it reached, in one call', async () => {
@@ -237,7 +256,7 @@ it('ignores a proactive candidate from its card beside other decisions, marked s
   const { results } = await h.runTool(h.runtime.masterId, 'orchestrator_route', { decisions: [
     { kind: 'ignore', trigger_id: chat.id, reason: 'Lunch chat.' },
     { kind: 'ignore', trigger_id: thanks.id, reason: 'Thanks only.' },
-    { kind: 'accept', trigger_id: proposal.id, title: 'Shorter title', worktree_name: 'short-title', acknowledgement: '收到。' },
+    { kind: 'accept', role_id: 'api-programmer', trigger_id: proposal.id, title: 'Shorter title', worktree_name: 'short-title', acknowledgement: '收到。' },
   ] }) as { results: Record<string, unknown>[] }
   expect(results).toEqual([
     { trigger_id: chat.id, kind: 'ignore', decision: 'ignore', reason: 'Ignored from its card, without a rule assessment; Lunch chat.' },
@@ -292,7 +311,7 @@ it('previews a prompt configuration without saving it, and saves one only agains
 
 it('releases the tools it registered for a Session once its agent is disposed, and leaves the other Sessions\' tools', async () => {
   const { ticket } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
-  const worker = `worker-${ticket.id}`
+  const worker = h.runtime.executor.sessionId(ticket)
   expect(h.tools.get(worker)!.size).toBeGreaterThan(0)
   h.ctx.emit('agent/disposed', { agent: h.agents.get(worker) } as never)
   expect([h.tools.get(worker)!.size, h.tools.get(h.runtime.masterId)!.size > 0]).toEqual([0, true])
@@ -345,11 +364,18 @@ it('reads a ticket with the ids it is tied to, its reports by assignment, and it
   expect(await read(`ticket/${ticket.id}/input/text:long`)).toMatchObject({ text: page.text })
   expect(await read(`ticket/${ticket.id}/inputs`, { offset: 20 })).toMatchObject({ items: expect.objectContaining({ length: 4 }), next_offset: null })
   expect(await read(details.assignments.items[0]!.report.read)).toMatchObject({ text: report(7).summary.slice(0, 4000) })
-  vi.mocked(h.controller.inspect).mockResolvedValueOnce({ events: [{ type: 'assistant/message', data: { message: { role: 'assistant',
-    content: [{ type: 'text', text: `I fixed the margin. ${'Details. '.repeat(20)}` }] } } }] } as never)
-  const transcript = JSON.parse((await read(`ticket/${ticket.id}/transcript`) as { text: string }).text) as { preview: string; read: string }
-  expect(transcript).toMatchObject({ preview: expect.stringMatching(/^I fixed the margin\./), read: `ticket/${ticket.id}/message/0` })
-  expect(transcript.preview.length).toBeLessThanOrEqual(80)
+  vi.mocked(h.controller.inspect).mockResolvedValueOnce({ events: [
+    { type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: JSON.stringify({ ticket_id: 'another-ticket' }) }] } },
+    { type: 'assistant/message', data: { message: { role: 'assistant', content: [{ type: 'text', text: 'Secret from another ticket.' }] } } },
+    { type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: JSON.stringify({ ticket_id: ticket.id }) }] } },
+    { type: 'assistant/message', data: { message: { role: 'assistant',
+      content: [{ type: 'text', text: `I fixed the margin. ${'Details. '.repeat(20)}` }] } } },
+  ] } as never)
+  const transcript = (await read(`ticket/${ticket.id}/transcript`) as { text: string }).text.trim().split('\n').map(line => JSON.parse(line) as { preview: string; read: string })
+  const answer = transcript.find(entry => /^I fixed the margin\./.test(entry.preview))!
+  expect(answer).toMatchObject({ preview: expect.stringMatching(/^I fixed the margin\./), read: `ticket/${ticket.id}/message/3` })
+  expect(transcript.map(entry => entry.preview).join(' ')).not.toContain('Secret')
+  expect(answer.preview.length).toBeLessThanOrEqual(80)
 })
 
 it('reads a trigger once with the message it replies to and the messages around it on its thread, without the CI runs', async () => {
@@ -483,9 +509,10 @@ it('gives a worker the other messages of the request its ticket was accepted fro
   const ticket = h.runtime.store.tickets.get((accepted.ticket as { ticket_id: string }).ticket_id)!
   const other = ticket.origin.triggerIds.find(id => id !== ticket.origin.triggerId)!
   expect(ticket.origin.triggerIds).toHaveLength(2)
-  const message = h.relays(`worker-${ticket.id}`)[0]!
+  const worker = h.runtime.executor.sessionId(ticket)
+  const message = h.relays(worker)[0]!
   expect(message.batch).toEqual([expect.objectContaining({ trigger_id: other, preview: expect.any(String), read: `trigger/${other}` })])
-  const page = await h.runTool(`worker-${ticket.id}`, 'orchestrator_read', { resource: `ticket/${ticket.id}` })
+  const page = await h.runTool(worker, 'orchestrator_read', { resource: `ticket/${ticket.id}` })
   expect(page).toMatchObject({ batch: [{ trigger_id: other, read: `trigger/${other}` }] })
-  expect(await h.runTool(`worker-${ticket.id}`, 'orchestrator_read', { resource: `trigger/${other}` })).toMatchObject({ trigger_id: other })
+  expect(await h.runTool(worker, 'orchestrator_read', { resource: `trigger/${other}` })).toMatchObject({ trigger_id: other })
 })

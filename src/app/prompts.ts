@@ -1,6 +1,6 @@
 /** Manages versioned role prompts, behavioral policies, and operational skills independently of access settings. */
 import { z } from 'zod'
-import { UserError, key } from '../core/index.ts'
+import { ROLES, UserError, key } from '../core/index.ts'
 import { policyVersion, type Settings, type SettingsOrigin } from '../policy.ts'
 import { masterPrompt, workerPrompt, sharedPrompt, guides, mainAdmissionPolicy, handoffPolicy, teamDefaults, sourceSkills, cliNotes } from './context.ts'
 import { environmentLines, type Variable } from './execution-environment.ts'
@@ -95,6 +95,12 @@ export function policySection(settings: Settings, config: PromptConfig = default
   const part = rules.length ? 'runtime/policy' : 'runtime/policy/none'
   return { key: part, text: fill(builtIn(config, part), { version: policyVersion(settings), mode: settings.eval.mode, rules: rules.join('\n') }) }
 }
+/** The immutable role catalog the main Session must choose from on every accept. Role choice changes dispatch only, never authorization. */
+export function rolesSection(): string {
+  return ['## Worker roles', 'Every accept selects one authorization-neutral role_id:',
+    ...ROLES.map(role => `- ${role.id}: ${role.responsibilities}`),
+    'Choose the closest responsibility; role choice never grants or expands authority.'].join('\n')
+}
 /**
  * Assemble a role's system prompt sections in order from fixed templates, team sections, the generated execution environment
  * and, last, the main Session's generated Policy section, which nothing follows, and whose change leaves the rest unchanged.
@@ -115,7 +121,10 @@ export function promptParts(config: PromptConfig, role: Role, environment?: stri
   ].filter(part => part.text)
 }
 export function composePrompt(config: PromptConfig, role: Role, environment?: string, policy?: { key: string; text: string }): string {
-  return promptParts(config, role, environment, policy).map(part => part.text).join('\n\n')
+  const parts = promptParts(config, role, environment, policy)
+  const texts = parts.map(part => part.text)
+  if (role === 'orchestrator') texts.splice(parts.findIndex(part => part.name === 'runtime/handoff'), 0, rolesSection())
+  return texts.join('\n\n')
 }
 export function composeSkill(config: PromptConfig, name: string): string {
   return name === 'feishu' || name === 'github' ? builtIn(config, `skill/${name}`) : config.skills[name] ?? ''

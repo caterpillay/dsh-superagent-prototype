@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { Store } from '../src/app/store.ts'
-import { Prompts, builtInBase, composePrompt, defaultPrompts, policySection, promptParts, type PromptConfig } from '../src/app/prompts.ts'
-import { USER_ERRORS, UserError } from '../src/core/index.ts'
+import { Prompts, builtInBase, composePrompt, defaultPrompts, policySection, promptParts, rolesSection, type PromptConfig } from '../src/app/prompts.ts'
+import { ROLES, USER_ERRORS, UserError } from '../src/core/index.ts'
 import { KV } from '../src/kv.ts'
 import { SettingsSchema, policyVersion } from '../src/policy.ts'
 import { guides, handoffPolicy, mainAdmissionPolicy, masterPrompt, sharedPrompt, workerPrompt } from '../src/app/context.ts'
@@ -55,6 +55,15 @@ it('assembles every role from fixed sections around the team sections, whatever 
   }
   expect(composePrompt(config, 'orchestrator')).toContain(mainAdmissionPolicy)
   expect(composePrompt(config, 'worker')).not.toContain(mainAdmissionPolicy)
+})
+
+it('generates the exact fixed worker role catalog outside editable prompt parts', () => {
+  const section = rolesSection()
+  for (const role of ROLES) expect(section).toContain(`- ${role.id}: ${role.responsibilities}`)
+  expect(section.match(/^- /gm)).toHaveLength(ROLES.length)
+  expect(section).toContain('authorization-neutral')
+  expect(composePrompt(defaultPrompts(), 'orchestrator')).toContain(section)
+  expect(composePrompt(defaultPrompts(), 'worker')).not.toContain(section)
 })
 
 it('reads a prompt file whatever its line ends and blank lines, and names a missing or empty one', () => {

@@ -5,7 +5,7 @@
 import { LIMITS } from './limits.ts'
 import { z } from 'zod'
 import { ADMISSION_DEFAULTS, type Admission, type AdmissionCell, type AdmissionRow } from './admission.ts'
-import { key, type AssessmentOutcome, type Mandate, type Policy, type PolicyEffect, type SourceScope, type Strength, type Thread, type Ticket,
+import { key, type AssessmentOutcome, type Mandate, type Policy, type PolicyEffect, type RoleId, type SourceScope, type Strength, type Thread, type Ticket,
   type Trigger, type ActorRef, type GateResult } from './core/index.ts'
 import { sameName } from './infra/text.ts'
 import { WORKER_COMMANDS } from './infra/environment.ts'
@@ -29,7 +29,7 @@ export function directionAllowed(value: unknown): value is AdmissionDirection {
 }
 export interface Assessment {
   decision: 'accept' | 'ignore' | 'unavailable'; rule_assessments: RuleAssessment[]; direction: unknown
-  title: string; scope: string; reason: string; intent_evidence?: string | null; acknowledgement?: string | null; worktree_name?: string
+  title: string; scope: string; reason: string; role_id?: RoleId; intent_evidence?: string | null; acknowledgement?: string | null; worktree_name?: string
 }
 /**
  * Validate an assessment against enabled rules and convert it into an engine `AssessmentOutcome`.
@@ -51,12 +51,13 @@ export function assessmentOutcome(assessment: Assessment, settings: Pick<Setting
   if (!directionAllowed(assessment.direction)) return { kind: 'ignore', audit, reason: { code: 'directionUnsettled' } }
   if (!matches.length) return { kind: 'ignore', audit, reason: { code: 'noRuleMatched' } }
   if (!assessment.intent_evidence) throw new Error('Acceptance requires intent_evidence')
-  const { title, scope, worktree_name: name } = assessment
+  if (!assessment.role_id) throw new Error('Acceptance requires role_id from the fixed role catalog')
+  const { title, scope, role_id: roleId, worktree_name: name } = assessment
   if (strength === 'inferred' && settings.eval.mode !== 'auto') {
-    const proposal = { title, scope, worktree_name: name }
+    const proposal = { title, scope, role_id: roleId, worktree_name: name }
     return { kind: 'ignore', audit: { ...audit, would_accept: true, proposal }, reason: { code: 'observed', values: { text: assessment.reason } } }
   }
-  return { kind: 'accept', title, scope, reason: assessment.reason, ...(assessment.acknowledgement ? { acknowledgement: assessment.acknowledgement } : {}),
+  return { kind: 'accept', title, scope, roleId, reason: assessment.reason, ...(assessment.acknowledgement ? { acknowledgement: assessment.acknowledgement } : {}),
     rules: matches.map(match => match.rule_id), audit, ...(name ? { name } : {}) }
 }
 const DEFAULT_RULES = [
