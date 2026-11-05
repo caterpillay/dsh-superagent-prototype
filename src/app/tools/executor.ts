@@ -20,11 +20,15 @@ export interface ExecutorToolsHost {
   sendReplies(): Promise<void>
 }
 
-export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
-  const ticketId = ticket.id
+export function executorTools(host: ExecutorToolsHost, target: Ticket | (() => Ticket | undefined)): Tool[] {
+  const current = (): Ticket => {
+    const ticket = typeof target === 'function' ? target() : host.store.tickets.get(target.id)
+    if (!ticket || !liveTicket(ticket)) throw new Error('No live ticket is leased to this worker Session')
+    return ticket
+  }
   return [
     readTool('Read one page of a resource of this ticket that the resource parameter lists. Follow next_offset, and next_resource where a page names one.',
-      true, (resource, offset, limit, signal) => readResource(host.resources, resource, offset, limit, ticketId, signal)),
+      true, (resource, offset, limit, signal) => readResource(host.resources, resource, offset, limit, current().id, signal)),
     tool({
       name: 'orchestrator_ack',
       description: 'Acknowledge one original human request before substantial work, as the replies section says; it posts as a reply to that message.',
@@ -33,6 +37,7 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         text: AcknowledgementSchema.describe(`At most ${IM_WORDS} words; Markdown is supported.`),
       }).strict(),
       execute: async args => {
+        const ticketId = current().id
         const reply = host.engine.reply({ purpose: 'acknowledgement', ticketId, triggerId: args.trigger_id, text: args.text })
         if (reply.status !== 'sent') await host.sendReplies()
         return { trigger_id: args.trigger_id, acknowledgement: host.store.replyStatus(reply.id)!, reused: reply.reused }
@@ -45,7 +50,7 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         thread: z.string().min(1).describe('The thread key, which trigger/<id> of one of its messages shows as thread, such as feishu:<chat>:<root> or github:<number>.'),
         reason: z.string().trim().min(1).max(300).describe('One sentence on why the thread is not about this ticket.'),
       }).strict(),
-      execute: async args => { host.engine.markUnrelated(ticketId, args.thread, args.reason); return { removed: true, thread: args.thread } },
+      execute: async args => { const ticketId = current().id; host.engine.markUnrelated(ticketId, args.thread, args.reason); return { removed: true, thread: args.thread } },
     }),
     tool({
       name: 'orchestrator_thread_follow',
@@ -55,6 +60,7 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         reason: z.string().trim().min(1).max(300).describe('How it relates, in one sentence.'),
       }).strict(),
       execute: async args => host.store.atomic(() => {
+        const ticketId = current().id
         const at = args.thread.indexOf(':')
         if (at < 1 || at === args.thread.length - 1) throw new Error('A thread key is <source>:<id>, such as github:<number>')
         const followed = host.engine.followForContext(ticketId, { source: args.thread.slice(0, at), id: args.thread.slice(at + 1) })
@@ -69,7 +75,7 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         trigger_id: z.string().min(1),
         reason: z.string().trim().min(1).max(300).describe('One sentence on what it asks for beyond this ticket.'),
       }).strict(),
-      execute: async args => ({ trigger_id: args.trigger_id, queued: host.engine.handback(ticketId, args.trigger_id, args.reason) }),
+      execute: async args => { const ticketId = current().id; return { trigger_id: args.trigger_id, queued: host.engine.handback(ticketId, args.trigger_id, args.reason) } },
     }),
     tool({
       name: 'orchestrator_report',
@@ -83,11 +89,11 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         reply_to_trigger_id: z.string().optional().describe('The explicit human question this report answers; never for ordinary progress.'),
       }).strict(),
       execute: async (args, signal) => {
-        const current = host.store.tickets.get(ticketId)
-        if (!current || !liveTicket(current)) throw new Error('Ticket ended (PR was closed or work finished); do not resume it')
+        const ticket = current(), ticketId = ticket.id
         const pull = args.pr_number != null ? await readPull(host.github, args.pr_number, signal) : undefined
         // Claim the PR, record the report, and queue the relay atomically so a rejected PR claim or invalid report leaves no partial state, and a recorded report always reaches the main Session.
         return host.store.atomic(() => {
+          if (current().id !== ticketId) throw new Error('The role Session switched to another Ticket while this report was prepared')
           const refused = pull && claimPull(host.github, ticketId, pull)
           if (refused) throw new Error(refused)
           const report = { state: args.state, summary: args.summary, ...(args.human_action !== undefined ? { question: args.human_action } : {}),

@@ -7,7 +7,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { dirname } from 'node:path'
 import { z } from 'zod'
 import { key, liveTicket, type Ticket } from '../core/index.ts'
-import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
+import { mandateInstructions } from '../executor/dsh.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { AgentDelivery, messageId } from './delivery.ts'
 import type { Effects } from './effects.ts'
@@ -34,8 +34,12 @@ export interface SessionsHost {
   closing(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
   environment(ticket: Ticket): Variable[]
-  /** Tools to register on the main Session (`ticket === undefined`) or on `ticket`'s worker Session. */
-  tools(agent: Agent, ticket?: Ticket): Tool[]
+  /** Resolve the Ticket currently executed by a worker Session; shared role Sessions change over time. */
+  ticketForSession(sessionId: string): Ticket | undefined
+  /** Whether `sessionId` is a managed worker identity even while no Ticket is currently leased. */
+  managedSession(sessionId: string): boolean
+  /** Tools to register on the main Session or on a worker Session whose Ticket is resolved at execution time. */
+  tools(agent: Agent, current?: () => Ticket | undefined): Tool[]
 }
 
 /**
@@ -123,8 +127,8 @@ export class Sessions {
     // its first turn DSH refuses any selection, which leaves it as it is.
     ctx.inject(['agentPresets'], child => {
       child.on('agent-preset/selected', (sessionId, preset) => {
-        const ticketId = ticketOfSession(sessionId), agent = ctx.agents.get(sessionId as SessionId)
-        const ours = sessionId === this.host.masterId ? ROUTER_PRESET : ticketId && this.host.store.tickets.get(ticketId) ? WORKER_PRESET : undefined
+        const agent = ctx.agents.get(sessionId as SessionId)
+        const ours = sessionId === this.host.masterId ? ROUTER_PRESET : this.host.managedSession(sessionId) ? WORKER_PRESET : undefined
         if (!ours || preset === ours || !agent) return
         const presets = child.get('agentPresets') as { select(agent: Agent, preset: string): Promise<string> }
         presets.select(agent, ours).catch(() => {})
@@ -225,16 +229,14 @@ export class Sessions {
       ? { state: 'error', detail: retries.slice(0, 5).map(item => `${item.sessionId}: ${item.provider} is over its model budget; retried ${item.attempts} times, waiting since ${item.since}; the model and retry policy are unchanged`).join('; ') + (retries.length > 5 ? `; ${retries.length - 5} more Sessions` : ''), at: retries.at(-1)!.lastAt }
       : { state: 'ready', detail: 'No managed Session is waiting on a model budget retry' })
   }
-  private ticketOf(agent: Agent): Ticket | undefined {
-    const ticketId = ticketOfSession(agent.id)
-    return ticketId === undefined ? undefined : this.host.store.tickets.get(ticketId)
-  }
+  private ticketOf(agent: Agent): Ticket | undefined { return this.host.ticketForSession(agent.id) }
   private async decorate(agent: Agent): Promise<void> {
     if (this.bindings.has(agent)) return
     const host = this.host
     const master = agent.id === host.masterId
-    const ticket = master ? undefined : this.ticketOf(agent)
-    if (!master && !ticket) { this.limitSubagent(agent); return }
+    const worker = !master && host.managedSession(agent.id)
+    if (!master && !worker) { this.limitSubagent(agent); return }
+    const current = (): Ticket | undefined => master ? undefined : host.ticketForSession(agent.id)
     const binding: SessionBinding = { disposers: [] }
     this.bindings.set(agent, binding)
     this.retryHealth.restore(agent.id, agent.session.snapshotEvents())
@@ -243,9 +245,11 @@ export class Sessions {
     // Disable variable interpolation so literal ${{ ... }} expressions in team prompts are preserved.
     binding.disposers.push(agent.ctx.systemPrompt.section({ name: 'dsh-superagent-policy', order: 9999, interpolate: false, text: context => {
       const version = this.promptFor(agent, context.signal !== undefined)
-      const current = ticket && host.store.tickets.get(ticket.id)
-      const composed = host.prompts.compose(version.config, master ? 'orchestrator' : 'worker', current ? host.environment(current) : undefined)
-      return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${current ? mandateInstructions(current.mandate) : ''}`
+      const ticket = current()
+      const composed = host.prompts.compose(version.config, master ? 'orchestrator' : 'worker', ticket ? host.environment(ticket) : undefined)
+      const active = ticket ? `${mandateInstructions(ticket.mandate)}\nActive ticket: ${ticket.id}. Only its mandate and directory apply; earlier ticket context grants no authority.`
+        : worker ? 'No ticket is currently leased to this role Session. Do not use work tools until a ticket is assigned.' : ''
+      return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${active}`
     }, ...(master ? { complete: true } : {}) }))
     // A recreated skill scope (e.g. after the skills service restarts) starts empty, so reset `binding.skills` before rebinding.
     const skillScope = agent.ctx.inject(['skills'], scope => {
@@ -258,13 +262,13 @@ export class Sessions {
     // Bail out if the agent was disposed while awaiting the skill scope.
     if (this.bindings.get(agent) !== binding) return
     const register = this.registerTool(agent, binding)
-    for (const tool of host.tools(agent, ticket)) register(tool.name, tool.description, tool.schema, tool.execute)
+    for (const tool of host.tools(agent, master ? undefined : current)) register(tool.name, tool.description, tool.schema, tool.execute)
     if (master) {
       binding.disposers.push(agent.ctx.tools.restrict({ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'] }),
         agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent))))
     } else {
-      // An Executor Session keeps the profile's work tools it has, which DSH requires to be known; its own tools are not masked.
-      binding.disposers.push(...this.workOnly(agent, ticket!.id))
+      // A shared role Session keeps only work tools while a live Ticket owns its lease.
+      binding.disposers.push(...this.workOnly(agent, current))
     }
   }
   /**
@@ -286,13 +290,12 @@ export class Sessions {
    * (see the executor). Read inherited tools through the parent scope, which includes the preset's tools. The global view
    * misses preset tools; the agent's own view also includes local tools such as subagent, which restrict refuses to name.
    */
-  private workOnly(agent: Agent, ticketId: string): (() => void)[] {
-    const store = this.host.store
+  private workOnly(agent: Agent, current: () => Ticket | undefined): (() => void)[] {
     const parent = scopeParentOf(agent)
     const allow = WORK_TOOLS.filter(name => agent.ctx.tools.get(name, parent))
     return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(() => {
-      const current = store.tickets.get(ticketId)
-      return !current || !liveTicket(current) ? 'Ticket ended; new work needs a new authorized ticket' : undefined
+      const ticket = current()
+      return !ticket || !liveTicket(ticket) ? 'No live ticket is leased to this worker Session' : undefined
     })]
   }
   /**
@@ -302,13 +305,15 @@ export class Sessions {
    */
   private limitSubagent(agent: Agent): void {
     let parent = agent.session.header.parentSession
-    // Up the subagents' parents to the worker, which are loaded while their subagents run.
-    for (let depth = 0; parent !== undefined && ticketOfSession(parent) === undefined && depth < 8; depth++) {
+    let ticket = parent === undefined ? undefined : this.host.ticketForSession(parent)
+    // Walk nested subagent parents up to the managed worker while they remain loaded.
+    for (let depth = 0; parent !== undefined && !ticket && depth < 8; depth++) {
       parent = this.ctx.agents.get(parent)?.session.header.parentSession
+      ticket = parent === undefined ? undefined : this.host.ticketForSession(parent)
     }
-    const ticketId = parent === undefined ? undefined : ticketOfSession(parent)
-    if (ticketId === undefined || !this.host.store.tickets.get(ticketId)) return
-    this.bindings.set(agent, { disposers: this.workOnly(agent, ticketId), subagent: true })
+    if (!ticket) return
+    const ticketId = ticket.id
+    this.bindings.set(agent, { disposers: this.workOnly(agent, () => this.host.store.tickets.get(ticketId)), subagent: true })
   }
   /** Register the skills of a prompt version in the agent's skill scope, in place of an earlier version's. */
   private bindSkills(binding: SessionBinding, version: PromptVersion): void {

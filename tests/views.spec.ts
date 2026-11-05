@@ -118,13 +118,16 @@ it('follows the Ticket\'s stage: a blocked Ticket a person answered since is wor
   const ticket = { id: 't1', title: 'Fix', decisionId: 'd', channels: [], undelivered: [], createdAt: at, updatedAt: at,
     mandate: { strength: 'explicit' as const, policyVersion: 'v', basis: { via: 'listed' as const }, actor: { source: 'feishu',
       id: 'ou_alice' }, scope: '' },
-    origin: { triggerId: 'e1', triggerIds: ['e1'] }, assignments: [{ id: 'a1', state: 'running' as const, createdAt: at, startedAt: at,
+    origin: { triggerId: 'e1', triggerIds: ['e1'] }, execution: { name: 'fix', directory: '/work/fix', assignment: '', roleId: 'qa' as const },
+    assignments: [{ id: 'a1', state: 'running' as const, createdAt: at, startedAt: at,
       report: blocked }],
     inputs: [] as { id: string; kind: 'trigger'; triggerId: string; at: string; human?: true }[] }
   store.tickets.save(ticket)
   const row = ticketSummary(store.tickets.get('t1')!)
-  expect(row).toMatchObject({ stage: 'person', action: 'blocked', actions: { retry: true }, note: { text: 'Needs the design file',
-    error: false } })
+  expect(row).toMatchObject({ stage: 'person', action: 'blocked', actions: { retry: true },
+    role: { id: 'qa', name: 'QA', responsibilities: expect.any(String) }, note: { text: 'Needs the design file',
+      error: false } })
+  expect(ticketDetail(host, 't1')).toMatchObject({ role: { id: 'qa', name: 'QA' } })
   expect(ticketDetail(host, 't1')!.assignments[0]).toMatchObject({ turnEndedAt: blocked.at })
   store.tickets.save({ ...ticket, inputs: [{ id: 'i1', kind: 'trigger', triggerId: 'e2', at: '2026-09-22T00:02:00Z', human: true }] })
   const answered = ticketSummary(store.tickets.get('t1')!)

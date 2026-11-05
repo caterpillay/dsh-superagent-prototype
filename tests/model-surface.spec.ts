@@ -13,7 +13,7 @@ import { promptParts } from '../src/app/prompts.ts'
 import { RESOURCES } from '../src/app/resources.ts'
 import { TICKET_STATES } from '../src/app/cards.ts'
 import { Runtime } from '../src/app/runtime.ts'
-import { workerSessionId } from '../src/executor/dsh.ts'
+import { workerSessionIdOf } from '../src/executor/roles.ts'
 import { Store } from '../src/app/store.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { inputMessage } from '../src/executor/dsh.ts'
@@ -164,7 +164,7 @@ async function drive(host: Host) {
   const request = feishu('1', '@bot 修一下回归'), thanks = feishu('3', '@bot 谢谢'), chat = feishu('4', '中午吃什么', { mentions: [] })
   await runtime.receive(request); await runtime.receive(thanks); await runtime.receive(chat)
   const routed = await run(master, 'orchestrator_route', { decisions: [
-    { kind: 'accept', trigger_id: request.id, title: '修复回归', worktree_name: 'fix-regression', acknowledgement: '收到，修复回归。' },
+    { kind: 'accept', trigger_id: request.id, role_id: 'api-programmer', title: '修复回归', worktree_name: 'fix-regression', acknowledgement: '收到，修复回归。' },
     { kind: 'ignore', trigger_id: thanks.id, reason: 'Thanks only.' }, { kind: 'ignore', trigger_id: chat.id, reason: 'Lunch chat.' }] }) as
     { results: { decision?: string; reason?: string; ticket?: { ticket_id: string } }[] }
   expect(routed.results.map(result => result.decision)).toEqual(['accept', 'ignore', 'ignore'])
@@ -176,13 +176,13 @@ async function drive(host: Host) {
   await runtime.receive(proposal)
   vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({ items: [{ message_id: 'om_5', chat_id: CHAT }] })
   await run(master, 'orchestrator_eval', { trigger_id: proposal.id })
-  const proactive = (await run(master, 'orchestrator_eval_decide', { trigger_id: proposal.id, decision: 'accept', title: '文案修订', worktree_name: 'copy-fix',
+  const proactive = (await run(master, 'orchestrator_eval_decide', { trigger_id: proposal.id, decision: 'accept', role_id: 'qa', title: '文案修订', worktree_name: 'copy-fix',
     scope: '改副标题', reason: 'explicit copy change', intent_evidence: 'quoted', acknowledgement: '收到，把副标题改成“浏览网页”。',
     rule_assessments: [{ rule_id: 'copy', matched: true, reason: 'copy change' }, { rule_id: 'visual', matched: false, reason: 'not visual' }],
     direction: { implementation_requested: true, target_basis: 'specified', requires_design_decision: false, evidence: 'it names the text' } })).ticket as { ticket_id: string }
   const b = proactive.ticket_id
   await runtime.idle()
-  const [workerA, workerB] = [a, b].map(workerSessionId) as [string, string]
+  const [workerA, workerB] = [a, b].map(id => workerSessionIdOf(runtime.store.tickets.get(id)!)) as [string, string]
   await run(workerA, 'orchestrator_report', { state: 'progress', summary: 'Needs a decision.', human_action: 'Desktop too?' })
   await run(workerA, 'orchestrator_report', { state: 'progress', summary: 'It reads the config.', human_action: null, reply_to_trigger_id: request.id })
   const other = feishu('9', '@bot 顺便看看这个')

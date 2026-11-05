@@ -15,7 +15,7 @@ import { feishuKind, feishuTrigger } from '../../src/sources/feishu.ts'
 import { githubKind } from '../../src/sources/github.ts'
 import { Commands } from '../../src/infra/commands.ts'
 import { credentialHelper, workerGitConfig } from '../../src/infra/environment.ts'
-import type { Trigger } from '../../src/core/index.ts'
+import { ROLE_IDS, type RoleId, type Trigger } from '../../src/core/index.ts'
 import { testMachine } from './deployment.ts'
 
 export const MEMBER = 'ou_alice'
@@ -267,19 +267,22 @@ export async function startRuntime(seed?: (store: Store) => void) {
     if (!tool) throw new Error(`Tool ${name} is not registered for ${sessionId}`)
     return await tool.execute(args, { signal: new AbortController().signal }) as Record<string, unknown>
   }
+  let roleIndex = 0
   /** Route one decision with the main Session's orchestrator_route, answering its result; a refused one throws its reason. */
   async function route(item: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const { results } = await runTool(runtime.masterId, 'orchestrator_route', { decisions: [item] }) as { results: Record<string, unknown>[] }
+    const decision = item.kind === 'accept' && item.role_id === undefined ? { role_id: ROLE_IDS[roleIndex++ % ROLE_IDS.length], ...item } : item
+    const { results } = await runTool(runtime.masterId, 'orchestrator_route', { decisions: [decision] }) as { results: Record<string, unknown>[] }
     if (results[0]!.refused) throw new Error(String(results[0]!.refused))
     return results[0]!
   }
-  async function acceptedTicket(trigger: Trigger) {
+  async function acceptedTicket(trigger: Trigger, roleId?: RoleId) {
     runtime.receive(trigger)
     await runtime.idle()
-    const result = await route({ kind: 'accept', trigger_id: trigger.id, title: `Fix ${trigger.id}`, worktree_name: 'fix-regression', acknowledgement: '收到，修复回归。' })
+    const result = await route({ kind: 'accept', trigger_id: trigger.id, title: `Fix ${trigger.id}`, worktree_name: 'fix-regression',
+      acknowledgement: '收到，修复回归。', ...(roleId ? { role_id: roleId } : {}) })
     await runtime.idle()
     const ticket = runtime.store.tickets.get((result.ticket as { ticket_id: string }).ticket_id)!
-    return { trigger, ticket, sessionId: `worker-${ticket.id}` }
+    return { trigger, ticket, sessionId: runtime.executor.sessionId(ticket) }
   }
   async function api(method: string, path: string, json?: unknown) {
     let status = 0, text = ''

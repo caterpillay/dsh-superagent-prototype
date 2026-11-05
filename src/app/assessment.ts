@@ -1,7 +1,7 @@
 /** Proactive candidate assessment for the main Session: relays candidate cards, serves bounded context reads, and records outcomes. */
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
-import { reasonText, threadKey, type Assessor, type AssessmentOutcome, type Candidate, type EngineForMainSession,
+import { ROLE_IDS, reasonText, threadKey, type Assessor, type AssessmentOutcome, type Candidate, type EngineForMainSession,
   type Trigger } from '../core/index.ts'
 import { AdmissionDirectionSchema, RuleAssessmentSchema, assessmentOutcome, directionAllowed, type Settings } from '../policy.ts'
 import { checkedImText } from '../infra/text.ts'
@@ -17,9 +17,12 @@ import type { Effects } from './effects.ts'
 
 /** Schema for a short lowercase kebab-case English ticket worktree name (1–4 words, at most 32 characters). */
 export const WorktreeNameSchema = z.string().max(32).regex(/^[a-z]+(?:-[a-z0-9]+){0,3}$/, 'Use 1–4 short English words in lowercase kebab-case, at most 32 characters').describe('Meaningful short English ticket name, e.g. fix-plan-color. Translate Chinese titles into English; no Chinese, pinyin or generic ticket names. 1–4 lowercase words in kebab-case, at most 32 characters.')
+/** Schema for one role in the fixed worker role catalog. */
+export const RoleIdSchema = z.enum(ROLE_IDS)
 /** Schema for the main Session's proactive candidate assessment decision (`orchestrator_eval_decide`). */
 export const AssessmentSchema = z.object({
   decision: z.enum(['accept', 'ignore', 'unavailable']),
+  role_id: RoleIdSchema.optional().describe('Required for acceptance: the fixed worker role best suited to the requested work. Role choice does not affect authorization.'),
   rule_assessments: z.array(RuleAssessmentSchema)
     .refine(assessments => new Set(assessments.map(assessment => assessment.rule_id)).size === assessments.length,
       'Duplicate rule assessment IDs').describe('One per enabled rule.'),
@@ -30,8 +33,10 @@ export const AssessmentSchema = z.object({
   intent_evidence: z.string().trim().min(1).max(700).nullish().describe('For acceptance: the quotes that establish the three facts.'),
   acknowledgement: AcknowledgementSchema.nullish().describe('For acceptance: one sentence in the source language, posted as a reply to the trigger; omit only when a matched rule asks for silence.'),
   reason: z.string().min(1).max(500),
-}).strict().refine(value => value.decision !== 'accept' || !directionAllowed(value.direction) || !value.rule_assessments.some(rule => rule.matched)
-  || !!value.worktree_name, { message: 'Accepted work requires a short English worktree_name', path: ['worktree_name'] })
+}).strict().refine(value => value.decision !== 'accept' || !!value.role_id,
+  { message: 'Accepted work requires role_id from the fixed role catalog', path: ['role_id'] })
+  .refine(value => value.decision !== 'accept' || !directionAllowed(value.direction) || !value.rule_assessments.some(rule => rule.matched)
+    || !!value.worktree_name, { message: 'Accepted work requires a short English worktree_name', path: ['worktree_name'] })
 
 /** Character limits in the initial thread window: for the trigger itself, its two nearest neighbours, other window messages, and stub previews. */
 const TRIGGER_CHARS = 4000, NEAR_CHARS = 1200, WINDOW_CHARS = 400, STUB_CHARS = 50

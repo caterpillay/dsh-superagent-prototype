@@ -282,12 +282,13 @@ describe('assessment outcomes', () => {
   const direction = { implementation_requested: true, target_basis: 'specified', requires_design_decision: false, evidence: 'asked' }
   const judged = (current: ReturnType<typeof settings>, matched: boolean) =>
     current.policy.rules.filter(rule => rule.enabled).map(rule => ({ rule_id: rule.id, matched, reason: 'judged' }))
-  const accept = (current: ReturnType<typeof settings>, matched = true) => ({ decision: 'accept' as const, rule_assessments: judged(current, matched),
+  const accept = (current: ReturnType<typeof settings>, matched = true) => ({ decision: 'accept' as const, role_id: 'api-programmer' as const,
+    rule_assessments: judged(current, matched),
     direction, title: 'Fix', scope: 'small', reason: 'asked', intent_evidence: 'quote', worktree_name: 'fix-copy' })
   it('accepts an inferred candidate on its matched rules in auto mode only, and the Policy admits only enabled matched rules', () => {
     const auto = settings('auto')
     const outcome = assessmentOutcome(accept(auto), auto, 'inferred')
-    expect(outcome).toMatchObject({ kind: 'accept', rules: auto.policy.rules.filter(rule => rule.enabled).map(rule => rule.id), name: 'fix-copy' })
+    expect(outcome).toMatchObject({ kind: 'accept', roleId: 'api-programmer', rules: auto.policy.rules.filter(rule => rule.enabled).map(rule => rule.id), name: 'fix-copy' })
     expect(assessmentOutcome(accept(settings('observe')), settings('observe'), 'inferred'))
       .toMatchObject({ kind: 'ignore', reason: { code: 'observed', values: { text: 'asked' } }, audit: { would_accept: true } })
     expect(assessmentOutcome(accept(auto, false), auto, 'inferred')).toMatchObject({ kind: 'ignore', reason: { code: 'noRuleMatched' } })
@@ -315,7 +316,7 @@ describe('admission table settings', () => {
   it('accepts an explicit candidate whatever the accept mode, which bears only on inferred ones', () => {
     const rules = SettingsSchema.parse({}).policy.rules.filter(rule => rule.enabled)
     const direction = { implementation_requested: true, target_basis: 'specified', requires_design_decision: false, evidence: 'asked' }
-    const assessment = { decision: 'accept' as const, direction, title: 'Fix', scope: 'small', reason: 'asked', intent_evidence: 'quote',
+    const assessment = { decision: 'accept' as const, role_id: 'product-manager' as const, direction, title: 'Fix', scope: 'small', reason: 'asked', intent_evidence: 'quote',
       rule_assessments: rules.map((rule, index) => ({ rule_id: rule.id, matched: index === 0, reason: 'judged' })) }
     for (const mode of ['observe', 'off'] as const) {
       const settings = SettingsSchema.parse({ eval: { mode } })
@@ -336,7 +337,7 @@ describe('rule judgements', () => {
     const parsed = SettingsSchema.parse({ eval: { mode: 'auto' }, policy: { rules: [{ id: 'copy', name: 'Copy', enabled: true, instruction: 'Fix typos.' },
       { id: 'visual', name: 'Visual', enabled: true, instruction: 'Fix colors.' }] } })
     const direction = { implementation_requested: true, target_basis: 'specified', requires_design_decision: false, evidence: 'asked' }
-    const assessment = { decision: 'accept' as const, direction, title: 'Fix', scope: 'small', reason: 'asked', intent_evidence: 'quote',
+    const assessment = { decision: 'accept' as const, role_id: 'product-manager' as const, direction, title: 'Fix', scope: 'small', reason: 'asked', intent_evidence: 'quote',
       rule_assessments: [{ rule_id: 'copy', matched: true, reason: 'typo' }, { rule_id: 'copy', matched: false, reason: 'again' }] }
     expect(() => assessmentOutcome(assessment, parsed, 'inferred')).toThrow('Exactly one assessment for every enabled rule')
     const once = { ...assessment, rule_assessments: [assessment.rule_assessments[0]!, { rule_id: 'visual', matched: false, reason: 'no colors' }] }

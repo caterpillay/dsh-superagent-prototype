@@ -5,7 +5,7 @@ import { z } from 'zod'
 import { UserError, followupOwners, key, reasonText, type Decision, type DecisionKind, type EngineForMainSession, type EngineForPeople }
   from '../../core/index.ts'
 import { IM_WORDS, NOTE_WORDS, wordCount } from '../../infra/text.ts'
-import { AssessmentSchema, EvalReadSchema, WorktreeNameSchema, type MasterAssessor } from '../assessment.ts'
+import { AssessmentSchema, EvalReadSchema, RoleIdSchema, WorktreeNameSchema, type MasterAssessor } from '../assessment.ts'
 import { ticketCard } from '../cards.ts'
 import { PromptConfigSchema, savePrompts, type Prompts } from '../prompts.ts'
 import { readResource, type MainResourceHost, type ResourceHost } from '../resources.ts'
@@ -47,6 +47,7 @@ const fromDecision = (decision: Decision) => ({ decision: decision.kind, reason:
 const RouteItemSchema = z.object({
   kind: z.enum(['accept', 'attach', 'ignore', 'stop']),
   trigger_id: z.string().describe('The candidate card\'s trigger_id; deciding it decides its batch.'),
+  role_id: z.string().nullish().describe(`accept: required fixed worker role for this ticket, one of ${RoleIdSchema.options.join(', ')}. Choose by responsibility; role choice does not affect authorization.`),
   ticket_id: z.string().nullish().describe('attach and stop: the ticket.'),
   title: z.string().nullish().describe('accept: a short label of at most 200 characters describing the original request; no added requirements or implementation advice.'),
   worktree_name: z.string().nullish().describe(`accept: ${WorktreeNameSchema.description ?? ''}`),
@@ -59,6 +60,7 @@ type Kind = RouteItem['kind']
 type Field = Exclude<keyof RouteItem, 'kind' | 'trigger_id'>
 /** Each field's check, the kinds whose items read it and those that need it; an item of another kind leaves it unread. */
 const FIELDS: Record<Field, { check: z.ZodType; reads: readonly Kind[]; needs: readonly Kind[] }> = {
+  role_id: { check: RoleIdSchema, reads: ['accept'], needs: ['accept'] },
   ticket_id: { check: z.string(), reads: ['attach', 'stop'], needs: ['attach', 'stop'] },
   title: { check: z.string().max(200), reads: ['accept'], needs: ['accept'] },
   worktree_name: { check: WorktreeNameSchema, reads: ['accept'], needs: ['accept'] },
@@ -94,12 +96,13 @@ function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<string
   switch (item.kind) {
     case 'accept': {
       const before = host.store.triggers.disposition(item.trigger_id)?.decisionId
-      const decision = host.engine.decide(item.trigger_id, { kind: 'accept', title: item.title!, scope: item.title!, reason: { code: 'explicitRouted' },
-        acknowledgement: item.acknowledgement!, name: item.worktree_name!, ...note })
+      const decision = host.engine.decide(item.trigger_id, { kind: 'accept', title: item.title!, scope: item.title!,
+        roleId: RoleIdSchema.parse(item.role_id),
+        reason: { code: 'explicitRouted' }, acknowledgement: item.acknowledgement!, name: item.worktree_name!, ...note })
       // A Decision that created no ticket is the item's refusal; one that existed before keeps what it was accepted with.
       if (decision.kind !== 'accept' || !decision.ticketId) return { refused: `Ticket was not created: ${reasonText(decision.reason)}` }
       if (decision.id === before) {
-        return { decision: 'accept', reason: `Already accepted as ${decision.ticketId}; title and acknowledgement unchanged`, ticketId: decision.ticketId }
+        return { decision: 'accept', reason: `Already accepted as ${decision.ticketId}; title, role and acknowledgement unchanged`, ticketId: decision.ticketId }
       }
       return { ...fromDecision(decision), triggerIds: decision.triggerIds }
     }

@@ -22,7 +22,9 @@ An `idle` Ticket has finished its turn without an outstanding question. A Trigge
 
 ## The Executor
 
-Each Ticket gets an Executor Session named `worker-<ticket id>` and a directory named after the Ticket's short name. Directories are created under the configured execution root, which defaults to `<stateDir>/work`.
+Every accepted Ticket keeps its own Mandate, Assignment history, directory, branch, replies and pull-request lifecycle. The main Session also selects one fixed role. Tickets assigned to a role reuse its persistent Session (`worker-<role id>`), while legacy stored Tickets without a role keep `worker-<ticket id>`. Only one Ticket may lease a role Session at a time; same-role Tickets queue, while different roles can run concurrently.
+
+A shared role Session has a stable workspace root, but each assignment card and system prompt names the active Ticket directory. The worker must use that directory for every file and shell operation. Earlier Ticket history remains useful context but grants no authority to the active Ticket.
 
 Executor Sessions run commands without approval as the operator's OS user. Their `dsh-superagent-worker` preset contains the tools needed for work and moves foreground shell commands to background jobs after 5 seconds. This lets a worker receive new messages at the next step instead of waiting for a long command to finish.
 
@@ -32,11 +34,11 @@ The main Session uses `dsh-superagent-router`, with the same 5-second shell and 
 
 When a turn ends with shell jobs or subagents still running, the Ticket keeps its worker slot and stays working. It is not reported as waiting, and the main Session receives no waiting report. A completed job or subagent wakes the Executor with its result in the same slot. Once a turn ends with no background work, the Executor reports waiting normally.
 
-After each turn, background work has at most 30 minutes to finish. At that limit, shell jobs are killed and the Ticket is reported waiting. The report includes the Executor's last words and which jobs were killed or subagents remain active. Subagents are allowed to continue. The Executor reads killed-job results on its next turn.
+After each turn, background work has at most 30 minutes to finish. At that limit, a shared role Session stops both jobs and subagents before reporting waiting and releasing its lease. A legacy per-Ticket Session keeps the earlier behavior: jobs are killed, subagents may continue, and the report names what remained.
 
 A handoff to a person frees the slot immediately and leaves the Report in effect. This applies after a `ready` Report or a question, unless another Input arrived since, and after any `blocked` or `failed` Report.
 
-At handoff, subagents stop. Shell jobs, such as a server offered for review, may continue until the Assignment ends. They hold no slot and are exempt from the 30-minute limit, including after later turns. Their completion does not wake the Executor; it reads the results on its next turn.
+At handoff, a shared role Session stops its subagents and shell jobs before releasing its lease, so no process or completion event from one Ticket can leak into the next. If bounded teardown cannot verify that jobs, subagents and the turn stopped, the lease stays quarantined and same-role Tickets remain queued. A legacy per-Ticket Session retains the earlier behavior: subagents stop, while shell jobs such as a review server may continue until that Assignment ends.
 
 A person can also start a turn by writing directly in the Executor Session. Its background work follows the same rules.
 
@@ -56,7 +58,7 @@ A failed command fails the Ticket and records its output. A retry or a person's 
 
 A Ticket holds a worker slot from the start of a launch, including preparation, or from the delivery that wakes its idle Executor. It also holds the slot throughout an active turn.
 
-The configured concurrency limit applies to these slots, with one extra slot for a person's message or a status request. Such a wake can use the extra slot when normal slots are full, and takes the next free slot before a new launch. New work therefore cannot prevent a person from continuing an existing Ticket.
+The configured concurrency limit applies to these slots, with one extra slot for a person's message or a status request. Such a wake can use the extra slot when normal slots are full, and takes the next free slot before a new launch. New work therefore cannot prevent a person from continuing an existing Ticket. The extra slot never bypasses a role lease: one role Session still serves only one Ticket at a time.
 
 Other Inputs, such as CI results, wait for a normal slot. A launch waits in `working / queued` until a slot is free. Launches run concurrently, so a slow prepare command delays only its own Ticket.
 

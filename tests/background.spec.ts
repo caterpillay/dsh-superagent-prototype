@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { expect, it, vi } from 'vitest'
-import { stopSubagents, untilQuiet } from '../src/executor/background.ts'
+import { killJobs, stopSubagents, untilQuiet } from '../src/executor/background.ts'
 import { jobRegistry } from './fixtures/host.ts'
 
 /** A context with DSH's job registry and subagents, and an idle worker agent with one live subagent, `child-1`. */
@@ -74,4 +74,23 @@ it('gives up a release of subagents that does not end within 10 seconds, and can
     await stopping
   } finally { vi.useRealTimers() }
   expect(agent.cancel).toHaveBeenCalledWith({ kind: 'user' }, { keepInbox: false })
+})
+
+it('rejects a strict role teardown when subagents do not drain within the bound', async () => {
+  const { ctx, agent } = setup(async () => false, () => new Promise(() => {}))
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  try {
+    const stopping = stopSubagents(ctx, agent, false, true)
+    const rejected = expect(stopping).rejects.toThrow('did not stop')
+    await vi.advanceTimersByTimeAsync(10_000)
+    await rejected
+  } finally { vi.useRealTimers() }
+})
+
+it('rejects a strict role teardown when killed jobs remain live', async () => {
+  const { ctx, jobs } = setup(async () => false)
+  jobs.run('worker-t1')
+  jobs.service.kill.mockImplementation(() => 'requested')
+  jobs.service.wait.mockResolvedValue({ id: 'bash-1', owner: 'worker-t1', status: 'running' })
+  await expect(killJobs(ctx, 'worker-t1', 'switch ticket', undefined, true)).rejects.toThrow('Killing the shell jobs of worker-t1 failed')
 })
